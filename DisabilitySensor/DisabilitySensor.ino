@@ -1,4 +1,4 @@
-#define ESP_DRD_USE_SPIFFS true
+#define ESP_DRD_USE_SPIFFS false
 
 // Include Libraries
 
@@ -26,14 +26,18 @@
 
 DHT dht(DHTPIN, DHTTYPE);
 
-#define CONF_DEMAND_PIN 12
+#define CONF_DEMAND_PIN 34
 #define ALARM_INPUT_PIN 18
 
 enum mode_led_t {
-  OPMODE_LED = 14, // Red
-  WIFI_LED = 27, // Green
-  TELEMETRY_LED = 24 // Blue
+  OPMODE_LED,
+  TELEMETRY_LED,
+  ERROR_LED
 };
+
+#define RED_LED 26
+#define GREEN_LED 27
+#define BLUE_LED 14
 
 // JSON configuration file
 #define JSON_CONFIG_FILE "/node_config.json"
@@ -48,12 +52,13 @@ const char *ap_password = "password123";
 char tokenString[31] = "YOUR_DEVICE_ACCESS_TOKEN";
 char serverString[21] = "demo.thingsboard.io";
 char descriptionString[25] = "DESCRIBE DEVICE";
+
 int portNumber = 1883;
 int telemetrySendInterval = 1;
 
-float lastHumidity = 0;
-float lastTemperature = 0;
-float lastHeatIndex = 0;
+float lastHumidity;
+float lastTemperature;
+uint8_t lastAlarmState = 1;
 
 constexpr uint32_t MAX_MESSAGE_SIZE = 512U;
 constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
@@ -73,6 +78,8 @@ uint32_t lastdhtSampleMillis; // Last DHT Sampling Millisecond
 uint32_t prevButtonHoldMillis; // Last Mode Button Pressed Millis
 
 uint8_t holdCounter = 0; // Temporary Button Counter
+bool telemetry_sent = false;
+bool sendIntervalAttribute = true;
 
 // WiFiManager Global variable
 WiFiManager wm;
@@ -226,38 +233,35 @@ void configModeCallback(WiFiManager *myWiFiManager) // Called when config mode l
 
 void setLedState(enum mode_led_t selectedLed, bool active) 
 {
-  switch(selectedLed){
-    case OPMODE_LED:
-    {
-      // Red
-      digitalWrite(OPMODE_LED, active);
-      digitalWrite(WIFI_LED, LOW);
-      digitalWrite(TELEMETRY_LED, LOW);
-    }
-    break;
-    WIFI_LED:
-    {
-      // Green
-      digitalWrite(OPMODE_LED, LOW);
-      digitalWrite(WIFI_LED, active);
-      digitalWrite(TELEMETRY_LED, LOW);
-    }
-    break;
-    TELEMETRY_LED:
-    {
-      // Blue
-      digitalWrite(OPMODE_LED, LOW);
-      digitalWrite(WIFI_LED, LOW);
-      digitalWrite(TELEMETRY_LED, active);
-    }
-    break;
-    default:
-    {
-      digitalWrite(OPMODE_LED, LOW);
-      digitalWrite(WIFI_LED, LOW);
-      digitalWrite(TELEMETRY_LED, LOW);
+  if(active) {
+    switch(selectedLed){
+      case OPMODE_LED:
+      {
+        setRGBLed(0, 0, 255);
+      }
+      break;
+      case ERROR_LED:
+      {
+        setRGBLed(255, 0, 0);
+      }
+      break;
+      case TELEMETRY_LED:
+      {
+        setRGBLed(0, 255, 0);
+      }
+      break;
     }
   }
+  else {
+    setRGBLed(0, 0, 0);
+  }
+}
+
+void setRGBLed(int red, int green, int blue)
+{
+  analogWrite(RED_LED, red);
+  analogWrite(GREEN_LED, green);
+  analogWrite(BLUE_LED, blue);
 }
 
 void setup()
@@ -279,9 +283,10 @@ void setup()
   pinMode(CONF_DEMAND_PIN, INPUT);
   pinMode(ALARM_INPUT_PIN, INPUT);
 
-  pinMode(OPMODE_LED, OUTPUT);
-  pinMode(WIFI_LED, OUTPUT);
-  pinMode(TELEMETRY_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+
   delay(10);
 
   char ssid[23];
@@ -323,7 +328,8 @@ void setup()
   // Set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
   wm.setAPCallback(configModeCallback);
   wm.setConnectTimeout(10);
-  wm.setConfigPortalTimeout(120);
+  wm.setConfigPortalTimeout(240);
+  setLedState(ERROR_LED, true);
 }
 
 void loop() {
@@ -333,42 +339,51 @@ void loop() {
     // Reading temperature or humidity takes about 250 milliseconds!
     // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
     float h = dht.readHumidity();
-    // Read temperature as Celsius (the default)
-    float t = dht.readTemperature();
+    // Read temperature as Fahrenheit (the default)
+    float t = dht.readTemperature(true);
 
     lastdhtSampleMillis = millis();
 
     // Check if any reads failed and exit early (to try again).
     if (!isnan(h) || !isnan(t)) {
-      float hic = dht.computeHeatIndex(t, h, false);
       lastHumidity = h;
       lastTemperature = t;
-      lastHeatIndex = hic;
     }
+    
+  }
+
+  if(telemetry_sent && (millis() - previousDataSendMillis) > 200) {
+    setLedState(TELEMETRY_LED, false);
+    telemetry_sent = false;
   }
 
   int currentDemandState = digitalRead(CONF_DEMAND_PIN);
   // if button pressed
-  if(currentDemandState == HIGH) 
+  if(currentDemandState == LOW) 
   {
-    if((millis() - prevButtonHoldMillis) >= 1000) 
+    // wait for 1 second
+    if(holdCounter == 0) { 
+      delay(3000);
+    }
+
+    setRGBLed(0, 0, 0);
+
+    if(currentDemandState == LOW && (millis() - prevButtonHoldMillis) >= 1000) 
     {
       holdCounter += 1;
       if(holdCounter > 3) holdCounter = 1;
 
       int duration = 600 / (holdCounter + 1);
       for(int i = 0; i < holdCounter; i++) {
-        Serial.println("led On");
         setLedState(OPMODE_LED, true);
         delay(duration);
-        Serial.println("led Off");
         setLedState(OPMODE_LED, false);
         delay(400);
       }
       prevButtonHoldMillis = millis();
     }
   }
-  else if(currentDemandState == LOW && holdCounter > 0) 
+  else if(currentDemandState == HIGH && holdCounter > 0) 
   {
       switch(holdCounter) {
         case 1:
@@ -419,12 +434,12 @@ void loop() {
     Serial.println(WiFi.gatewayIP());
 
     forceConfig = false;
+    sendIntervalAttribute = true;
   }
   else {
     if(holdCounter == 0) {
       // other process here
       if(WiFi.status() == WL_CONNECTED) {
-        setLedState(WIFI_LED, true);
 
         if (!tb.connected()) {
           // Connect to the ThingsBoard
@@ -435,11 +450,23 @@ void loop() {
 
           if (!tb.connect((const char*)&serverString, (const char*)&tokenString, portNumber)) {
             Serial.println("Failed to connect");
+            setLedState(ERROR_LED, true);
             return;
           }
-          
+
+          setLedState(ERROR_LED, false);
+          Serial.print("Connected to: ");
+          Serial.println((const char*)&serverString);
           // Sending a MAC address as an attribute
           tb.sendAttributeData("macAddress", WiFi.macAddress().c_str());
+        }
+
+        uint8_t alarmState = !digitalRead(ALARM_INPUT_PIN); // Inverted Value
+        if(alarmState != lastAlarmState) {
+          lastAlarmState = alarmState;
+          tb.sendTelemetryData("alarmState", lastAlarmState);
+          Serial.print("Alarm ");
+          Serial.println((alarmState ? "Raised" : "Standby"));
         }
 
         // Sending telemetry every telemetrySendInterval time
@@ -447,27 +474,60 @@ void loop() {
         {
           tb.sendTelemetryData("temperature", lastTemperature);
           tb.sendTelemetryData("humidity", lastHumidity);
-          tb.sendTelemetryData("heatIndex", lastHeatIndex);
+          
+          if(sendIntervalAttribute) {
+            tb.sendAttributeData("interval", telemetrySendInterval);
+            sendIntervalAttribute = false;
+          }
           tb.sendAttributeData("rssi", WiFi.RSSI());
           tb.sendAttributeData("channel", WiFi.channel());
           tb.sendAttributeData("bssid", WiFi.BSSIDstr().c_str());
           tb.sendAttributeData("localIp", WiFi.localIP().toString().c_str());
           tb.sendAttributeData("ssid", WiFi.SSID().c_str());
+          
+          setLedState(TELEMETRY_LED, true);
+          telemetry_sent = true;
 
           previousDataSendMillis = millis();
+
+          Serial.print("temperature: ");
+          Serial.print(lastTemperature);
+          Serial.print(" | humidity: ");
+          Serial.print(lastHumidity);
+          Serial.print(" | alarmState: ");
+          Serial.print(lastAlarmState);
+
+          Serial.print(" | interval: ");
+          Serial.print(telemetrySendInterval);
+
+          Serial.print(" | rssi: ");
+          Serial.print(WiFi.RSSI());
+          Serial.print(" | channel: ");
+          Serial.print(WiFi.channel());
+          Serial.print(" | bssid: ");
+          Serial.print(WiFi.BSSIDstr().c_str());
+          Serial.print(" | localIp: ");
+          Serial.print(WiFi.localIP().toString().c_str());
+          Serial.print(" | ssid: ");
+          Serial.println(WiFi.SSID().c_str());
         }
         
       } else {
 
-        setLedState(WIFI_LED, false);
-
-        Serial.print(millis());
+        setLedState(ERROR_LED, true);
         Serial.println("Reconnecting to WiFi...");
         wm.setEnableConfigPortal(false);
         wm.autoConnect((const char*)ap_ssid, ap_password);
+        sendIntervalAttribute = true;
       }
     }
   }
 
   tb.loop();
+  // 24 hours equals 86400 seconds
+  if(millis() > (86400 * 1000)) {
+    delay(3000);
+    //reset module
+    ESP.restart();
+  }
 }
